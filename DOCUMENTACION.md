@@ -37,3 +37,14 @@ Siguiendo el paso 3 del README de `amq2-service-ml`, dentro de `airflow/` creamo
 Una aclaración importante: la carpeta `airflow/logs/` queda excluida del control de versiones por el `.gitignore` (ahí se acumulan los logs de cada ejecución de Airflow, y no tiene sentido versionarlos). Esto significa que, al clonar el repositorio, cada integrante del equipo tiene que crear esa carpeta vacía de forma manual antes de levantar Docker Compose, porque Airflow espera encontrarla ya creada.
 
 Respecto a las credenciales del `.env`: son las credenciales de ejemplo que trae el scaffold de la cátedra (usuario/contraseña genéricos para Airflow, PostgreSQL y MinIO). No representan un riesgo real porque los servicios solo quedan expuestos en `localhost` de la máquina de cada uno, no son accesibles desde internet.
+
+## Verificación del entorno
+
+Una vez levantado el stack con `docker compose --profile all up`, verificamos que los cuatro servicios quedaran operativos:
+
+- **Airflow** (`localhost:8080`): el panel de estado muestra en verde MetaDatabase, Scheduler, Triggerer y Dag Processor. Todavía no hay DAGs propios cargados.
+- **MLflow** (`localhost:5001`): accesible, con el experimento `Default` creado automáticamente.
+- **MinIO** (`localhost:9001`): accesible, con los buckets `data` y `mlflow` ya creados por el contenedor de inicialización.
+- **FastAPI** (`localhost:8800/docs`): accesible, mostrando por ahora el endpoint base del scaffold (`GET /`).
+
+Con esto confirmamos que la infraestructura containerizada quedó correctamente instalada y funcionando, antes de empezar a construir el DAG y el experimento propios del proyecto.
