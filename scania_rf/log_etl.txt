@@ -1,0 +1,6 @@
+Shape train original: (60000, 127)
+Columnas eliminadas por alta correlacion (> 0.9): 43
+['am_0', 'an_000', 'ao_000', 'aq_000', 'ba_001', 'ba_002', 'ba_003', 'ba_004', 'ba_005', 'ba_006', 'bb_000', 'bg_000', 'bh_000', 'bi_000', 'bj_000', 'bm_000', 'bn_000', 'bo_000', 'bp_000', 'bq_000', 'br_000', 'bt_000', 'bu_000', 'bv_000', 'by_000', 'cc_000', 'cf_000', 'ci_000', 'cn_004', 'cn_005', 'co_000', 'cq_000', 'cs_005', 'dc_000', 'dn_000', 'dp_000', 'dt_000', 'ed_000', 'ee_000', 'ee_001', 'ee_002', 'ee_003', 'ee_004']
+Columnas eliminadas por baja correlacion con el target (< 0.075): 37
+['cu_000', 'ag_009', 'cb_000', 'cs_007', 'ac_000', 'cy_000', 'cp_000', 'az_008', 'bl_000', 'as_000', 'ay_009', 'ct_000', 'cr_000', 'dz_000', 'dh_000', 'cz_000', 'aj_000', 'db_000', 'af_000', 'ab_000', 'ef_000', 'ca_000', 'eg_000', 'ag_000', 'dk_000', 'ak_000', 'ch_000', 'ea_000', 'ae_000', 'dl_000', 'da_000', 'dm_000', 'az_009', 'dj_000', 'cs_009', 'ad_000', 'cs_008']
+Shapes finales -> train: (48000, 89), val: (12000, 89), test: (16000, 89)

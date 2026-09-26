@@ -21,18 +21,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import make_scorer
 from sklearn.model_selection import GridSearchCV
 
-# Importaciones nuevas para MLflow
-import mlflow
-import mlflow.sklearn
-from mlflow.models import infer_signature
-from mlflow_aux import get_or_create_experiment
-
-
-# Credenciales de MinIO para guardar artefactos desde afuera de Docker (recordar borror luego de conectar con Airflow)
-os.environ["AWS_ACCESS_KEY_ID"] = "minio"
-os.environ["AWS_SECRET_ACCESS_KEY"] = "minio123"
-os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://localhost:9000"
-
 # Costos de negocio (ver notebook original, seccion "Planteo del problema")
 COSTO_REVISION_INNECESARIA = 10  # costo de revisar un camion que no iba a fallar (FP)
 COSTO_FALLA_NO_DETECTADA = 500  # costo de no detectar un camion que si falla (FN)
@@ -173,64 +161,44 @@ def buscar_mejor_umbral(
     return pd.DataFrame(resultados)
 
 
-if __name__ == "__main__":
-    # 1. Configurar MLflow y crear/obtener el experimento
-    mlflow.set_tracking_uri("http://localhost:5001")
-    experiment_id = get_or_create_experiment("Fallas_APS_Scania")
-    
-    # 2. Cargar datos y preparar scorer
-    X_train, y_train, X_val, y_val = cargar_datasets_entrenamiento(".")
-    costo_scorer = make_scorer(calcular_costo, greater_is_better=False)
+# Entrenamos el modelo
+X_train, y_train, X_val, y_val = cargar_datasets_entrenamiento(".")
 
-    # 3. Iniciar el tracking de MLflow
-    with mlflow.start_run(experiment_id=experiment_id, run_name="RandomForest_GridSearch"):
-        
-        # Entrenamiento
-        grid_rf, metricas_entrenamiento_rf = entrenar_random_forest(
-            X_train, y_train, HIPERPARAMETROS_RF, costo_scorer, cv=5
-        )
-        best_rf = grid_rf.best_estimator_
+costo_scorer = make_scorer(calcular_costo, greater_is_better=False)
 
-        # Búsqueda de umbral
-        tabla_umbrales = buscar_mejor_umbral(best_rf, X_val, y_val, UMBRALES_A_PROBAR)
-        mejor_fila = tabla_umbrales.loc[tabla_umbrales["costo"].idxmin()]
-        umbral_final = float(mejor_fila["umbral"])
+grid_rf, metricas_entrenamiento_rf = entrenar_random_forest(
+    X_train, y_train, HIPERPARAMETROS_RF, costo_scorer, cv=5
+)
+best_rf = grid_rf.best_estimator_
 
-        # 4. Logueo en MLflow (Parámetros y Métricas)
-        mlflow.log_params(metricas_entrenamiento_rf["mejores_hiperparametros"])
-        mlflow.log_metric("umbral_decision", umbral_final)
-        mlflow.log_metric("costo_negocio_val", float(mejor_fila["costo"]))
-        mlflow.log_metric("tiempo_busqueda_segundos", metricas_entrenamiento_rf["tiempo_segundos"])
-        mlflow.log_metric("memoria_usada_mb", metricas_entrenamiento_rf["memoria_usada_mb"])
+tabla_umbrales = buscar_mejor_umbral(best_rf, X_val, y_val, UMBRALES_A_PROBAR)
+mejor_fila = tabla_umbrales.loc[tabla_umbrales["costo"].idxmin()]
+umbral_final = float(mejor_fila["umbral"])
 
-        # 5. Firma y guardado del Artefacto (Modelo) en MinIO
-        signature = infer_signature(X_train, best_rf.predict(X_train))
-        mlflow.sklearn.log_model(
-            sk_model=best_rf,
-            artifact_path="modelo_rf",
-            signature=signature,
-            serialization_format='cloudpickle'
-        )
+# Generamos el artefacto del modelo en binario
+with open("./modelo_rf.pkl", "wb") as f:
+    pickle.dump(best_rf, f)
 
-        # 6. Generación de artefactos locales (Se mantiene intacto para test_scania_rf.py)
-        with open("./modelo_rf.pkl", "wb") as f:
-            pickle.dump(best_rf, f)
+# Generamos el artefacto con la informacion del entrenamiento (hiperparametros
+# elegidos y umbral de decision), que despues consume test_scania_rf.py
+info_modelo = {
+    "mejores_hiperparametros": metricas_entrenamiento_rf["mejores_hiperparametros"],
+    "umbral_decision": umbral_final,
+    "tiempo_busqueda_segundos": metricas_entrenamiento_rf["tiempo_segundos"],
+    "memoria_usada_mb": metricas_entrenamiento_rf["memoria_usada_mb"],
+}
+with open("./modelo_rf_info.json", "w") as f:
+    json.dump(info_modelo, f, indent=2)
 
-        info_modelo = {
-            "mejores_hiperparametros": metricas_entrenamiento_rf["mejores_hiperparametros"],
-            "umbral_decision": umbral_final,
-            "tiempo_busqueda_segundos": metricas_entrenamiento_rf["tiempo_segundos"],
-            "memoria_usada_mb": metricas_entrenamiento_rf["memoria_usada_mb"],
-        }
-        with open("./modelo_rf_info.json", "w") as f:
-            json.dump(info_modelo, f, indent=2)
-
-        with open("./log_entrenamiento.txt", "w") as f:
-            f.write("Mejores hiperparametros:\n")
-            f.write(f"{metricas_entrenamiento_rf['mejores_hiperparametros']}\n")
-            f.write(f"Tiempo de busqueda (GridSearchCV): {metricas_entrenamiento_rf['tiempo_segundos']:.2f} segundos\n")
-            f.write(f"Memoria usada: {metricas_entrenamiento_rf['memoria_usada_mb']:.2f} MB\n")
-            f.write(f"Umbral de decision elegido (validacion): {umbral_final:.2f}\n")
-            f.write("\nBarrido de umbrales evaluados:\n")
-            f.write(tabla_umbrales.to_string(index=False))
-            f.write("\n")
+with open("./log_entrenamiento.txt", "w") as f:
+    f.write("Mejores hiperparametros:\n")
+    f.write(f"{metricas_entrenamiento_rf['mejores_hiperparametros']}\n")
+    f.write(
+        f"Tiempo de busqueda (GridSearchCV): "
+        f"{metricas_entrenamiento_rf['tiempo_segundos']:.2f} segundos\n"
+    )
+    f.write(f"Memoria usada: {metricas_entrenamiento_rf['memoria_usada_mb']:.2f} MB\n")
+    f.write(f"Umbral de decision elegido (validacion): {umbral_final:.2f}\n")
+    f.write("\nBarrido de umbrales evaluados:\n")
+    f.write(tabla_umbrales.to_string(index=False))
+    f.write("\n")

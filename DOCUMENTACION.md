@@ -48,3 +48,14 @@ Una vez levantado el stack con `docker compose --profile all up`, verificamos qu
 - **FastAPI** (`localhost:8800/docs`): accesible, mostrando por ahora el endpoint base del scaffold (`GET /`).
 
 Con esto confirmamos que la infraestructura containerizada quedó correctamente instalada y funcionando, antes de empezar a construir el DAG y el experimento propios del proyecto.
+
+## Integración de MLflow al entrenamiento
+
+Una vez que tuvimos el pipeline separado en los tres scripts (`etl_scania.py`, `train_scania_rf.py`, `test_scania_rf.py`), sumamos tracking y registro de modelos con MLflow al script de entrenamiento, en una nueva versión llamada `train_scania_rf_mlflow.py`. Mantiene las mismas salidas locales (`modelo_rf.pkl`, `modelo_rf_info.json`, `log_entrenamiento.txt`) que ya consume `test_scania_rf.py`, así que no hizo falta tocar el script de testeo.
+
+- **Tracking server y experimento**: el script configura `MLFLOW_TRACKING_URI` (apuntando al servidor levantado por Docker Compose) y el experimento `Fallas_Scania_APS`, que MLflow crea automáticamente la primera vez que se corre.
+- **Registro por corrida**: cada ejecución queda como un run nuevo dentro del experimento, sin pisar corridas anteriores. Se loguean los hiperparámetros elegidos por `GridSearchCV`, el umbral de decisión óptimo encontrado sobre el set de validación, y las métricas asociadas (costo de negocio, falsos positivos, falsos negativos).
+- **Artefacto versionado**: el modelo entrenado se loguea como artefacto en MLflow mediante `mlflow.sklearn.log_model`, usando MinIO como backend de artefactos (el mismo bucket `mlflow` que ya se creaba al levantar el stack).
+- **`registrar_modelo_champion()`**: registra cada run en el Model Registry bajo el nombre `modelo_scania_fallas` y le asigna el alias `champion` a la versión recién creada.
+
+Un punto importante a dejar aclarado: tal como está implementada ahora, la asignación del alias `champion` es incondicional, no compara la corrida nueva contra el champion vigente, simplemente reemplaza el alias cada vez que se corre el script. Esto es intencional para esta etapa de exploración manual (lo que llamamos Bloque A): tiene sentido que cada prueba que hagamos quede marcada como el "candidato actual". La comparación explícita challenger vs. champion antes de decidir si promover un modelo —evaluando ambos sobre el set de test y quedándose con el mejor— la vamos a implementar recién en el DAG de reentrenamiento (Bloque B).

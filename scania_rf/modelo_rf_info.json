@@ -1,0 +1,9 @@
+{
+  "mejores_hiperparametros": {
+    "class_weight": "balanced",
+    "max_depth": 10,
+    "min_samples_leaf": 20,
+    "n_estimators": 200
+  },
+  "umbral_decision": 0.41
+}
