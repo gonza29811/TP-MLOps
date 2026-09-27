@@ -77,6 +77,31 @@ Toma el modelo y el umbral guardados por `train_scania_rf.py` y los evalúa sobr
 | `importancia_features.png` | Top 10 features más importantes según el modelo |
 | `log_testeo.txt` | Todas las métricas numéricas + `classification_report` de sklearn |
 
+## `train_scania_rf_mlflow.py` — Entrenamiento con tracking en MLflow
+
+Es una variante de `train_scania_rf.py`: mismo entrenamiento, misma búsqueda de hiperparámetros y misma lógica de elección de umbral, pero instrumentada con MLflow.
+
+- Registra cada corrida como un run nuevo dentro del experimento `Fallas_Scania_APS` (no pisa corridas anteriores), logueando hiperparámetros, umbral de decisión y métricas de validación (costo de negocio, falsos positivos, falsos negativos).
+- Loguea el modelo entrenado como artefacto versionado en MLflow, usando MinIO como backend de artefactos.
+- Registra el modelo en el Model Registry (`modelo_scania_fallas`) y le asigna el alias `champion` a la versión recién creada.
+- Lee las credenciales y endpoints (MLflow, MinIO) desde el `.env` del repo, no hardcodeados.
+
+**Artefactos que genera** (los mismos que `train_scania_rf.py`, para que `test_scania_rf.py` los pueda seguir consumiendo sin cambios):
+
+| Archivo | Contenido |
+|---|---|
+| `modelo_rf.pkl` | Binario del modelo entrenado (mejor estimador del GridSearchCV) |
+| `modelo_rf_info.json` | Hiperparámetros elegidos y umbral de decisión |
+| `log_entrenamiento.txt` | Detalle legible de lo anterior + tabla completa del barrido de umbrales |
+
+## `cargar_datos_originales_s3.py` — Carga de datos originales a MinIO
+
+Sube los datasets crudos (`aps_failure_training_set.csv`, `aps_failure_test_set.csv`) al bucket `data` de MinIO, bajo el prefijo `datos_originales/`.
+
+Es necesario correrlo porque los contenedores de Airflow no tienen acceso al filesystem de esta carpeta del repo: en `docker-compose.yaml` solo se montan `airflow/dags`, `airflow/logs`, `airflow/config`, `airflow/plugins` y `airflow/secrets` dentro del contenedor. Cualquier DAG que necesite estos datos crudos tiene que leerlos desde el bucket de MinIO, no desde una ruta local del repo — por eso este script se corre a mano, por fuera de Airflow, cada vez que hay datos nuevos para sumar, dejándolos disponibles en MinIO antes de disparar el DAG correspondiente.
+
+**Artefactos que genera:** ninguno en esta carpeta — el resultado queda subido directamente al bucket `data` de MinIO (`s3://data/datos_originales/aps_failure_training_set.csv` y `s3://data/datos_originales/aps_failure_test_set.csv`).
+
 ## Buenas prácticas aplicadas
 
 - Código modular: cada función resuelve una única tarea, con nombre descriptivo.

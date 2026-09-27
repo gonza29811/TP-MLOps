@@ -1,5 +1,7 @@
 # Documentación del proyecto — TP Final MLOps 1
 
+> **Estado al 27/09 (entrega parcial):** el pipeline de ETL (`proceso_etl`) y el de reentrenamiento challenger/champion (`entrenamiento_challenger`) están terminados y funcionando de punta a punta en Airflow, con tracking, Model Registry y promoción automática en MLflow. Lo único pendiente para la entrega final es conectar el endpoint de FastAPI para que sirva el modelo champion vigente (Track C, C2-C3 en `Plan de Trabajo.xlsx`).
+
 Este documento registra las decisiones de diseño e implementación que fuimos tomando a lo largo del proyecto, y por qué las tomamos. La idea es que sirva tanto de documentación técnica del trabajo como de registro para nosotros mismos, para no perder de vista los motivos detrás de cada decisión.
 
 ## Elección de la base del proyecto
@@ -59,3 +61,31 @@ Una vez que tuvimos el pipeline separado en los tres scripts (`etl_scania.py`, `
 - **`registrar_modelo_champion()`**: registra cada run en el Model Registry bajo el nombre `modelo_scania_fallas` y le asigna el alias `champion` a la versión recién creada.
 
 Un punto importante a dejar aclarado: tal como está implementada ahora, la asignación del alias `champion` es incondicional, no compara la corrida nueva contra el champion vigente, simplemente reemplaza el alias cada vez que se corre el script. Esto es intencional para esta etapa de exploración manual (lo que llamamos Bloque A): tiene sentido que cada prueba que hagamos quede marcada como el "candidato actual". La comparación explícita challenger vs. champion antes de decidir si promover un modelo —evaluando ambos sobre el set de test y quedándose con el mejor— la vamos a implementar recién en el DAG de reentrenamiento (Bloque B).
+
+## Carga manual de datos crudos a MinIO
+
+Los datasets crudos (`aps_failure_training_set.csv`, `aps_failure_test_set.csv`) no viven dentro del repositorio como parte del pipeline automatizado: los contenedores de Airflow no tienen acceso al filesystem local de la máquina de cada integrante, así que el punto de partida tiene que ser un bucket de MinIO al que sí puedan acceder.
+
+Para resolver esto armamos `cargar_datos_originales_s3.py`, un script de "bootstrap" (el empujón inicial que pone en marcha el pipeline antes de que este pueda funcionar por sus propios medios): no corre dentro de ningún DAG, sino que cada integrante lo ejecuta manualmente desde su propia máquina cada vez que hay datos nuevos para sumar al proyecto. Sube los archivos crudos al bucket `data`, bajo el prefijo `datos_originales/`, que es de donde después el DAG de ETL los va a leer.
+
+## DAG de ETL (`proceso_etl.py`)
+
+Migramos la lógica de `etl_scania.py` a un DAG de Airflow, para que el proceso de limpieza y preparación de datos deje de ser un paso manual y pase a ser parte del pipeline automatizado. El DAG se estructura en dos tareas encadenadas:
+
+- **`obtener_dataset`**: verifica que los datos crudos existan en MinIO (subidos previamente por `cargar_datos_originales_s3.py`) y le pasa a la siguiente tarea la ubicación de los archivos.
+- **`procesar_etl`**: descarga los datos crudos, aplica la misma limpieza que `etl_scania.py` (elimina la columna constante, imputa valores faltantes por mediana, filtra features muy correlacionadas entre sí y con baja correlación respecto al target, separa train/validación/test), y sube los splits resultantes de vuelta a MinIO, bajo el prefijo `datos_procesados/`.
+
+Cada tarea usa `@task.virtualenv`, que crea un entorno virtual aislado y efímero por ejecución con únicamente las dependencias que esa tarea necesita, en vez de depender del entorno global del contenedor de Airflow.
+
+## DAG de reentrenamiento challenger/champion (`entrenamiento_challenger.py`)
+
+Este es el DAG que automatiza el Bloque B: entrenar un modelo nuevo (el "challenger") y decidir si reemplaza al modelo vigente en producción (el "champion") en el Model Registry de MLflow. Se estructura en dos tareas:
+
+- **`entrenar_modelo`**: descarga los datos procesados desde MinIO, entrena un `RandomForestClassifier` con búsqueda de hiperparámetros y elección de umbral de decisión (mismo criterio que `train_scania_rf_mlflow.py`), y lo loguea como un run nuevo en MLflow —con la curva ROC y la matriz de confusión como artefactos— sin registrarlo todavía en el Model Registry.
+- **`comparar_y_promover`**: decide si ese challenger reemplaza al champion vigente, evaluando a ambos sobre el set de test y quedándose con el de menor costo de negocio (normalizado por cantidad de muestras, para que la comparación sea justa entre corridas con datasets de distinto tamaño).
+
+Para poder hacer rollback sin tener que buscar en el historial de versiones, la promoción reasigna dos alias: `champion` (el modelo vigente) y `champion_anterior` (el que estaba vigente justo antes).
+
+## Estabilización del esquema de columnas del ETL
+
+Detectamos que `procesar_etl` podía generar un conjunto distinto de columnas según el dataset de entrada, lo que rompía la compatibilidad entre un champion ya entrenado y una corrida posterior. Se resolvió calculando ese esquema de columnas una única vez y persistiéndolo en MinIO (`datos_procesados/columnas_descartadas.json`).
