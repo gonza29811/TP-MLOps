@@ -1,4 +1,13 @@
 # TP Final — MLOps 1 (CEIA - FIUBA)
+Profesor: Dr. Ing. Facundo Adrián Lucianna
+
+## Integrantes
+
+- (a2632) Gonzalo Martin Rodriguez
+- (a2508) Matías Guido Bovio
+- (a2628) Elián Ricardo Pinzás
+
+## Descripción
 
 Implementación productiva del modelo de detección de fallas del sistema de aire a presión (APS) en camiones Scania, sobre el entorno containerizado de la cátedra (Apache Airflow, MLflow, MinIO, PostgreSQL y FastAPI).
 
