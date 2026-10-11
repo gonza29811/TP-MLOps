@@ -15,7 +15,7 @@ default_args = {
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    dagrun_timeout=timedelta(minutes=30),
+    dagrun_timeout=timedelta(minutes=90),
     tags=["TP MLOps"],
 )
 def entrenamiento_challenger():
@@ -28,18 +28,32 @@ def entrenamiento_challenger():
             "scikit-learn>=1.3",
             "matplotlib>=3.8",
             "mlflow>=3.16",
+            "cloudpickle>=2.2",
         ],
         system_site_packages=False,
     )
     def entrenar_modelo():
         """
-        Descarga los datos procesados por proceso_etl desde MinIO, entrena
-        un nuevo RandomForestClassifier (challenger) con busqueda de
-        hiperparametros y eleccion de umbral de decision (igual criterio
-        que train_scania_rf_mlflow.py), lo loguea como un run nuevo en
-        MLflow -junto con la curva ROC y la matriz de confusion sobre el
-        set de test como artefactos- y evalua su costo de negocio sobre
-        ese mismo set.
+        Descarga los datos crudos (solo separados en train/val/test por
+        proceso_EL, sin imputar ni filtrar columnas) desde MinIO, y arma
+        un Pipeline de scikit-learn que incluye todo el preprocesamiento
+        (eliminar columna constante, imputar por mediana, descartar
+        features por alta correlacion entre si y por baja correlacion con
+        el target) seguido del RandomForestClassifier. Busca
+        hiperparametros con GridSearchCV y el umbral de decision que
+        minimiza el costo de negocio sobre validacion (mismo criterio que
+        siempre), y loguea el resultado en MLflow -junto con la curva ROC
+        y la matriz de confusion sobre el set de test como artefactos.
+
+        A diferencia de versiones anteriores, el artefacto que se loguea
+        no es el RandomForestClassifier solo: es un modelo pyfunc que
+        envuelve el Pipeline completo (preprocesamiento + clasificador) y
+        aplica el umbral de decision internamente. Esto hace que el
+        modelo registrado en MLflow sea autosuficiente: cualquiera que lo
+        cargue puede pasarle un dato crudo (con todas las columnas
+        originales) y recibe directo la prediccion final (0/1), sin
+        necesitar el codigo del ETL, ni el umbral, ni ningun archivo
+        aparte.
 
         No lo registra todavia en el Model Registry: eso lo decide la
         siguiente tarea (comparar_y_promover), segun si supera o no al
@@ -50,30 +64,38 @@ def entrenamiento_challenger():
             sobre el set de test.
         :rtype: dict
         """
+        import json
+
         import boto3
         import mlflow
-        import mlflow.sklearn
+        import mlflow.pyfunc
         import numpy as np
         import pandas as pd
         from mlflow.models import infer_signature
+        from sklearn.base import BaseEstimator, TransformerMixin
         from sklearn.ensemble import RandomForestClassifier
+        from sklearn.impute import SimpleImputer
         from sklearn.metrics import make_scorer
         from sklearn.model_selection import GridSearchCV
+        from sklearn.pipeline import Pipeline
 
         BUCKET_NAME = "data"
-        PREFIJO_DATOS_PROCESADOS = "datos_procesados"
+        PREFIJO_DATOS_SPLITS = "datos_splits"
         MLFLOW_TRACKING_URI = "http://mlflow:5000"
         MLFLOW_EXPERIMENT_NAME = "Fallas_Scania_APS"
 
         COSTO_REVISION_INNECESARIA = 10
         COSTO_FALLA_NO_DETECTADA = 500
+        COLUMNA_CONSTANTE = "cd_000"
+        UMBRAL_CORRELACION_ALTA = 0.9
+        UMBRAL_CORRELACION_BAJA = 0.075
         RANDOM_STATE = 42
 
         HIPERPARAMETROS_RF = {
-            "n_estimators": [150, 200, 300],
-            "max_depth": [5, 6, 8, 10],
-            "min_samples_leaf": [10, 15, 20],
-            "class_weight": ["balanced"],
+            "modelo__n_estimators": [150, 200, 300],
+            "modelo__max_depth": [5, 6, 8, 10],
+            "modelo__min_samples_leaf": [10, 15, 20],
+            "modelo__class_weight": ["balanced"],
         }
         UMBRALES_A_PROBAR = np.arange(0.41, 0.62, 0.01)
 
@@ -85,7 +107,97 @@ def entrenamiento_challenger():
                 + falsos_positivos * COSTO_REVISION_INNECESARIA
             )
 
-        print("Descargando datos procesados desde MinIO...")
+        class Limpieza_Imputacion(BaseEstimator, TransformerMixin):
+            """Elimina la columna constante e imputa valores faltantes por
+            mediana. Las medianas se ajustan una unica vez, sobre los
+            datos de entrenamiento, y quedan congeladas dentro del
+            transformador (no se recalculan en cada transform)."""
+
+            def __init__(self, columna_constante=COLUMNA_CONSTANTE):
+                self.columna_constante = columna_constante
+
+            def fit(self, X, y=None):
+                X = X.drop(columns=[self.columna_constante], errors="ignore")
+                self.columnas_ = list(X.columns)
+                self.imputer_ = SimpleImputer(strategy="median")
+                self.imputer_.fit(X)
+                return self
+
+            def transform(self, X):
+                X = X.drop(columns=[self.columna_constante], errors="ignore")
+                X = X[self.columnas_]
+                valores_imputados = self.imputer_.transform(X)
+                return pd.DataFrame(
+                    valores_imputados, columns=self.columnas_, index=X.index
+                )
+
+        class SelectorPorCorrelacion(BaseEstimator, TransformerMixin):
+            """Descarta, de cada par de features con correlacion absoluta
+            entre si mayor al umbral indicado, una de las dos columnas;
+            y descarta las features cuya correlacion absoluta con el
+            target sea menor al umbral indicado. Las columnas a
+            descartar se deciden una unica vez en el fit (sobre
+            entrenamiento) y quedan fijas para siempre."""
+
+            def __init__(
+                self,
+                umbral_alta_correlacion=UMBRAL_CORRELACION_ALTA,
+                umbral_baja_correlacion=UMBRAL_CORRELACION_BAJA,
+            ):
+                self.umbral_alta_correlacion = umbral_alta_correlacion
+                self.umbral_baja_correlacion = umbral_baja_correlacion
+
+            def fit(self, X, y=None):
+                corr_matrix = X.corr().abs()
+                upper = corr_matrix.where(
+                    np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+                )
+                columnas_alta_corr = [
+                    col
+                    for col in upper.columns
+                    if any(upper[col] > self.umbral_alta_correlacion)
+                ]
+
+                columnas_baja_corr = []
+                if y is not None:
+                    X_sin_alta_corr = X.drop(columns=columnas_alta_corr)
+                    y_serie = pd.Series(np.asarray(y), index=X.index)
+                    corr_con_target = X_sin_alta_corr.corrwith(y_serie)
+                    columnas_baja_corr = corr_con_target[
+                        corr_con_target.abs() < self.umbral_baja_correlacion
+                    ].index.tolist()
+
+                columnas_a_eliminar = set(columnas_alta_corr) | set(columnas_baja_corr)
+                self.columnas_finales_ = [
+                    c for c in X.columns if c not in columnas_a_eliminar
+                ]
+                return self
+
+            def transform(self, X):
+                return X[self.columnas_finales_]
+
+        class ModeloConUmbral(mlflow.pyfunc.PythonModel):
+            """Envuelve un Pipeline de scikit-learn (preprocesamiento +
+            clasificador) y aplica el umbral de decision de negocio sobre
+            la probabilidad de la clase positiva, devolviendo
+            directamente 0/1. Es lo que se loguea como artefacto en
+            MLflow, para que el modelo registrado sea autosuficiente:
+            recibe un dato crudo (todas las columnas originales) y
+            devuelve la decision final, sin pasos manuales aparte."""
+
+            def load_context(self, context):
+                import cloudpickle
+
+                with open(context.artifacts["pipeline"], "rb") as f:
+                    self.pipeline = cloudpickle.load(f)
+                with open(context.artifacts["umbral"]) as f:
+                    self.umbral = float(f.read())
+
+            def predict(self, context, model_input, params=None):
+                probabilidades = self.pipeline.predict_proba(model_input)[:, 1]
+                return (probabilidades >= self.umbral).astype(int)
+
+        print("Descargando datos (crudos, solo separados en splits) desde MinIO...")
         s3 = boto3.client("s3")
         for archivo in (
             "X_train.csv", "y_train.csv",
@@ -93,7 +205,7 @@ def entrenamiento_challenger():
             "X_test.csv", "y_test.csv",
         ):
             s3.download_file(
-                BUCKET_NAME, f"{PREFIJO_DATOS_PROCESADOS}/{archivo}", f"./{archivo}"
+                BUCKET_NAME, f"{PREFIJO_DATOS_SPLITS}/{archivo}", f"./{archivo}"
             )
 
         X_train = pd.read_csv("./X_train.csv")
@@ -107,10 +219,16 @@ def entrenamiento_challenger():
         mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
         costo_scorer = make_scorer(calcular_costo, greater_is_better=False)
 
-        print("Entrenando RandomForest (busqueda de hiperparametros)...")
+        pipeline_base = Pipeline([
+            ("limpieza", Limpieza_Imputacion()),
+            ("seleccion_columnas", SelectorPorCorrelacion()),
+            ("modelo", RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=1)),
+        ])
+
+        print("Entrenando Pipeline (preprocesamiento + RandomForest) con GridSearchCV...")
         with mlflow.start_run(run_name="RandomForest_GridSearch_Airflow") as run:
             grid_search = GridSearchCV(
-                RandomForestClassifier(random_state=RANDOM_STATE, n_jobs=1),
+                pipeline_base,
                 HIPERPARAMETROS_RF,
                 refit=True,
                 cv=5,
@@ -118,10 +236,10 @@ def entrenamiento_challenger():
                 n_jobs=-1,
             )
             grid_search.fit(X_train, y_train)
-            mejor_modelo = grid_search.best_estimator_
+            mejor_pipeline = grid_search.best_estimator_
 
             print("Buscando mejor umbral de decision sobre validacion...")
-            probabilidades_val = mejor_modelo.predict_proba(X_val)[:, 1]
+            probabilidades_val = mejor_pipeline.predict_proba(X_val)[:, 1]
             mejor_umbral, mejor_costo_val = None, None
             for umbral in UMBRALES_A_PROBAR:
                 prediccion = (probabilidades_val >= umbral).astype(int)
@@ -133,14 +251,18 @@ def entrenamiento_challenger():
             falsos_negativos_val = int(((y_val == 1) & (prediccion_val == 0)).sum())
             falsos_positivos_val = int(((y_val == 0) & (prediccion_val == 1)).sum())
 
-            mlflow.log_params(grid_search.best_params_)
+            mejores_hiperparametros = {
+                clave.replace("modelo__", ""): valor
+                for clave, valor in grid_search.best_params_.items()
+            }
+            mlflow.log_params(mejores_hiperparametros)
             mlflow.log_param("umbral_decision", mejor_umbral)
             mlflow.log_metric("costo_negocio_val", float(mejor_costo_val))
             mlflow.log_metric("falsos_negativos_val", falsos_negativos_val)
             mlflow.log_metric("falsos_positivos_val", falsos_positivos_val)
 
             print("Evaluando al challenger sobre el set de test...")
-            probabilidades_test = mejor_modelo.predict_proba(X_test)[:, 1]
+            probabilidades_test = mejor_pipeline.predict_proba(X_test)[:, 1]
             prediccion_test = (probabilidades_test >= mejor_umbral).astype(int)
             costo_test_challenger = calcular_costo(y_test, prediccion_test)
             falsos_negativos_test = int(((y_test == 1) & (prediccion_test == 0)).sum())
@@ -191,12 +313,26 @@ def entrenamiento_challenger():
             mlflow.log_figure(fig_matriz, "matriz_confusion.png")
             plt.close(fig_matriz)
 
-            signature = infer_signature(X_train, mejor_modelo.predict(X_train))
-            mlflow.sklearn.log_model(
-                sk_model=mejor_modelo,
+            print("Empaquetando Pipeline + umbral como pyfunc...")
+            import cloudpickle
+
+            with open("./pipeline.pkl", "wb") as f:
+                cloudpickle.dump(mejor_pipeline, f)
+            with open("./umbral.txt", "w") as f:
+                f.write(str(mejor_umbral))
+
+            # La signature se infiere sobre una muestra de prediccion real
+            # (0/1, ya con el umbral aplicado), no sobre la probabilidad.
+            prediccion_train_ejemplo = (
+                mejor_pipeline.predict_proba(X_train.head(100))[:, 1] >= mejor_umbral
+            ).astype(int)
+            signature = infer_signature(X_train.head(100), prediccion_train_ejemplo)
+
+            mlflow.pyfunc.log_model(
                 artifact_path="modelo_rf",
+                python_model=ModeloConUmbral(),
+                artifacts={"pipeline": "./pipeline.pkl", "umbral": "./umbral.txt"},
                 signature=signature,
-                serialization_format="cloudpickle",
             )
             run_id = run.info.run_id
 
@@ -204,7 +340,6 @@ def entrenamiento_challenger():
         return {
             "run_id": run_id,
             "artifact_path": "modelo_rf",
-            "umbral_decision": mejor_umbral,
             "costo_test_challenger": costo_test_challenger,
             "cantidad_muestras_test": len(y_test),
         }
@@ -217,6 +352,7 @@ def entrenamiento_challenger():
             "numpy>=1.26",
             "scikit-learn>=1.3",
             "mlflow>=3.16",
+            "cloudpickle>=2.2",
         ],
         system_site_packages=False,
     )
@@ -225,15 +361,21 @@ def entrenamiento_challenger():
         Decide si el challenger recien entrenado reemplaza al champion
         vigente en el Model Registry de MLflow.
 
+        Como ahora el artefacto registrado es un pyfunc autosuficiente
+        (Pipeline + umbral ya aplicado), esta tarea ya no necesita leer
+        el umbral del run por separado: el champion cargado con
+        mlflow.pyfunc.load_model ya devuelve directamente la prediccion
+        final (0/1) al llamar a predict().
+
         - Si no hay ningun champion todavia (primera corrida): registra al
           challenger y le asigna el alias 'champion' directamente.
-        - Si ya hay un champion: descarga su modelo y su umbral, lo evalua
-          sobre el mismo set de test (descargado fresco desde MinIO) y
-          compara el costo de negocio contra el del challenger, dividido
-          por la cantidad de muestras de cada uno (para que la comparacion
-          no se vea afectada si el tamano del set de test cambio entre
-          una corrida y otra). Ese costo normalizado se usa solo para
-          decidir, no se loguea como metrica.
+        - Si ya hay un champion: lo evalua sobre el mismo set de test
+          (descargado fresco desde MinIO) y compara el costo de negocio
+          contra el del challenger, dividido por la cantidad de muestras
+          de cada uno (para que la comparacion no se vea afectada si el
+          tamano del test set cambio entre una corrida y otra). Ese costo
+          normalizado se usa solo para decidir, no se loguea como
+          metrica.
             - Si el challenger gana: registra su version, mueve el alias
               'champion' vigente a 'champion_anterior' y asigna 'champion'
               a la version nueva.
@@ -246,13 +388,13 @@ def entrenamiento_challenger():
         """
         import boto3
         import mlflow
-        import mlflow.sklearn
+        import mlflow.pyfunc
         import pandas as pd
         from mlflow.exceptions import MlflowException
         from mlflow.tracking import MlflowClient
 
         BUCKET_NAME = "data"
-        PREFIJO_DATOS_PROCESADOS = "datos_procesados"
+        PREFIJO_DATOS_SPLITS = "datos_splits"
         MLFLOW_TRACKING_URI = "http://mlflow:5000"
         NOMBRE_MODELO = "modelo_scania_fallas"
         ALIAS_CHAMPION = "champion"
@@ -296,21 +438,17 @@ def entrenamiento_challenger():
             return
 
         print(f"Champion actual: version {version_champion_actual.version}. Evaluando...")
-        umbral_champion = float(
-            client.get_run(version_champion_actual.run_id).data.params["umbral_decision"]
-        )
-        modelo_champion = mlflow.sklearn.load_model(
+        modelo_champion = mlflow.pyfunc.load_model(
             f"models:/{NOMBRE_MODELO}@{ALIAS_CHAMPION}"
         )
 
         s3 = boto3.client("s3")
-        s3.download_file(BUCKET_NAME, f"{PREFIJO_DATOS_PROCESADOS}/X_test.csv", "./X_test.csv")
-        s3.download_file(BUCKET_NAME, f"{PREFIJO_DATOS_PROCESADOS}/y_test.csv", "./y_test.csv")
+        s3.download_file(BUCKET_NAME, f"{PREFIJO_DATOS_SPLITS}/X_test.csv", "./X_test.csv")
+        s3.download_file(BUCKET_NAME, f"{PREFIJO_DATOS_SPLITS}/y_test.csv", "./y_test.csv")
         X_test = pd.read_csv("./X_test.csv")
         y_test = pd.read_csv("./y_test.csv").squeeze("columns")
 
-        probabilidades_champion = modelo_champion.predict_proba(X_test)[:, 1]
-        prediccion_champion = (probabilidades_champion >= umbral_champion).astype(int)
+        prediccion_champion = modelo_champion.predict(X_test)
         costo_test_champion = calcular_costo(y_test, prediccion_champion)
         cantidad_muestras_champion = len(y_test)
 
