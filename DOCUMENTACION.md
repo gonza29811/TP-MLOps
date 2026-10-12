@@ -66,3 +66,13 @@ El DAG `entrenamiento_challenger` entrena un modelo nuevo (el *challenger*) y de
 Cuando todavía no existe ningún champion (primera corrida), el challenger se registra y se promueve directamente.
 
 Para poder volver atrás sin buscar en el historial de versiones, cada promoción reasigna dos alias: `champion` pasa a la versión nueva y `champion_anterior` queda en la que estaba vigente justo antes.
+
+## Servicio de predicción online (FastAPI)
+
+**Online vs batch.** Elegimos servir el modelo de forma *online*: la API responde cada pedido en el momento, con el champion vigente. La alternativa, *batch*, consiste en predecir sobre un conjunto grande de registros con un proceso programado (por ejemplo, un DAG que corra cuando aparezca un champion nuevo) y guardar el resultado; es útil para volúmenes grandes, pero deja a la API sin función. Un DAG batch se podría sumar más adelante reutilizando la misma carga del modelo.
+
+**Funcionamiento.** `dockerfiles/fastapi/app.py` carga `models:/modelo_scania_fallas@champion` desde el Model Registry. En cada pedido consulta qué versión tiene el alias `champion` y, si cambió, vuelve a cargar el modelo, de modo que una promoción hecha por `comparar_y_promover` se refleja sin reiniciar el servicio. Si todavía no existe un champion, responde 503.
+
+**Entrada.** Como el pyfunc recibe el dato crudo, el pedido es una lista de registros con los nombres de columna originales. Las columnas ausentes se completan con valores faltantes, que el pipeline imputa con las medianas de entrenamiento. La API llama directamente al pipeline guardado dentro del pyfunc (`predict_proba`) para devolver la probabilidad además de la decisión; así evita la validación de la *signature* del modelo, que se infirió sobre las primeras 100 filas de entrenamiento y puede tipar como enteras las columnas que no tienen faltantes en esa muestra, lo que haría fallar un pedido con valores faltantes en ellas.
+
+**Verificación.** `dockerfiles/fastapi/probar_api.py` envía una muestra de 200 registros del set de test (30 con falla). Resultado: las 30 fallas detectadas y 6 falsas alarmas sobre 170 registros sin falla, en línea con el costo medido en el entrenamiento.

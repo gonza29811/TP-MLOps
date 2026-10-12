@@ -25,7 +25,7 @@ Implementación productiva del modelo de detección de fallas del sistema de air
 | MinIO | Almacén de objetos compatible con S3: datos y artefactos de modelos | 9000 (API), 9001 (consola) |
 | PostgreSQL | Base de datos de Airflow y de MLflow | 5432 |
 | Redis | Cola de tareas de Airflow (CeleryExecutor) | interno |
-| FastAPI | API del proyecto | 8800 |
+| FastAPI | Sirve el modelo `champion` para predicciones online | 8800 |
 
 Flujo de datos:
 
@@ -47,6 +47,7 @@ flowchart LR
     D2[("MinIO · data/datos_splits<br/>train · val · test")]
     RUN["MLflow · run del experimento<br/>parámetros · métricas · gráficos<br/>modelo guardado en MinIO (bucket mlflow)"]
     REG["MLflow · Model Registry<br/>modelo_scania_fallas con alias champion"]
+    API["FastAPI<br/>POST /predict"]
 
     UCI -->|"descarga si no están"| T1
     T1 --> D1
@@ -56,13 +57,14 @@ flowchart LR
     T3 --> RUN
     RUN --> T4
     T4 -->|"si el challenger supera al champion"| REG
+    REG -->|"carga el champion"| API
 
     classDef task fill:#e3f2fd,stroke:#1565c0,color:#0d2c4d
     classDef storage fill:#fff3e0,stroke:#e65100,color:#4a2000
     classDef mlflow fill:#e8f5e9,stroke:#2e7d32,color:#143d17
     classDef ext fill:#f3e5f5,stroke:#6a1b9a,color:#2e0a40
     classDef dag fill:#ffffff,stroke:#1565c0,color:#0d2c4d
-    class T1,T2,T3,T4 task
+    class T1,T2,T3,T4,API task
     class D1,D2 storage
     class RUN,REG mlflow
     class UCI ext
@@ -94,8 +96,6 @@ flowchart LR
 
    Deben figurar los diez servicios en estado `healthy`. Los contenedores `airflow-init` y `minio_create_bucket` terminan solos después de inicializar el entorno, por eso no aparecen en esa lista (se pueden ver con `docker compose --profile all ps -a`, como `exited`).
 4. Para detener el entorno, presionar `Ctrl+C` en la terminal donde se ejecutó el paso 2 y, para eliminar los contenedores conservando los datos, ejecutar `docker compose --profile all down`. Para borrarlo todo, incluidos los volúmenes (MinIO y las bases de MLflow y Airflow), agregar la opción `-v`.
-
-No hace falta crear carpetas ni cargar datos a mano: `airflow/config`, `airflow/dags` y `airflow/plugins` ya vienen en el repositorio, `airflow/logs` la crea Docker y los datos los descarga el primer DAG.
 
 ## Accesos
 
@@ -144,10 +144,41 @@ Se ejecuta de forma manual (*Trigger*) y tiene dos tareas:
 - **Primera corrida (arranque en frío).** Como todavía no existe ningún champion, el challenger se registra y se promueve directamente.
 - **Corridas siguientes.** Cada vez que se dispara `entrenamiento_challenger`, el nuevo modelo se compara contra el champion sobre el mismo set de test (se compara el costo por muestra). Si gana, se registra una nueva versión, el alias `champion` pasa a ella y el champion anterior queda con el alias `champion_anterior`, lo que permite volver atrás sin buscar en el historial. Si pierde, no se registra nada y el run queda solo en el historial del experimento.
 
+## Cómo usar la API
+
+La API de FastAPI predice a pedido (de forma *online*) con el modelo que tenga el alias `champion` en el Model Registry. Si el champion cambia, la API empieza a usar la nueva versión sin reiniciarse. Antes de la primera ejecución de `entrenamiento_challenger` no hay champion y `/predict` responde con error 503.
+
+| Endpoint | Función |
+|---|---|
+| `GET /modelo` | Versión del champion que se está sirviendo y su umbral de decisión |
+| `POST /predict` | Predice la falla para uno o más registros |
+
+`POST /predict` recibe una lista de registros, cada uno con los valores de los sensores por nombre de columna. Las columnas que no se envían, o que valen `null`, se tratan como valores faltantes y el pipeline las imputa:
+
+```json
+{"registros": [{"aa_000": 76698, "ab_000": null, "ac_000": 2130706438}]}
+```
+
+La respuesta incluye, por cada registro, la probabilidad de falla y la decisión final (`falla`) según el umbral del modelo.
+
+Para probarla desde el navegador, abrir http://localhost:8800/docs, elegir `POST /predict`, *Try it out* y *Execute*.
+
+**Prueba con datos reales.** El script `dockerfiles/fastapi/probar_api.py` toma una muestra del set de test (30 casos con falla y 170 sin falla), la envía a la API y muestra cuántas fallas detecta y cuántas falsas alarmas genera. Se ejecuta desde la raíz del repositorio:
+
+```bash
+docker compose exec -T fastapi python - < dockerfiles/fastapi/probar_api.py
+```
+
+En PowerShell:
+
+```powershell
+Get-Content dockerfiles/fastapi/probar_api.py | docker compose exec -T fastapi python -
+```
+
 ## Estructura del repositorio
 
 - **`airflow/`**: DAGs (`proceso_EL.py`, `entrenamiento_challenger.py`) y configuración de Airflow.
-- **`dockerfiles/`**: imágenes de Airflow, MLflow, PostgreSQL y FastAPI.
+- **`dockerfiles/`**: imágenes de Airflow, MLflow, PostgreSQL y FastAPI (`dockerfiles/fastapi/` incluye la API y el script de prueba).
 - **`docker-compose.yaml`, `.env`**: definición de los servicios y de sus variables de configuración.
 - **[`DOCUMENTACION.md`](DOCUMENTACION.md)**: registro de las decisiones de diseño e implementación.
 - **[`CHANGELOG.md`](CHANGELOG.md)**: registro cronológico de los cambios hechos para la entrega final.

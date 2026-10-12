@@ -32,3 +32,9 @@ Ninguno de esos archivos formaba parte del flujo: los DAGs leen y escriben todo 
 El `README.md` de la raíz pasó a ser la única guía para levantar y ejecutar el proyecto.
 
 `DOCUMENTACION.md` se reescribió para describir el diseño actual y los motivos de cada decisión, sin el relato de las etapas anteriores: ya no menciona los scripts eliminados, el DAG `proceso_etl` ni la carga manual de datos.
+
+## Servicio de predicción online (FastAPI)
+
+Antes el servicio de FastAPI solo tenía un endpoint de bienvenida. Ahora sirve el modelo `champion` del Model Registry de forma online: `POST /predict` recibe registros crudos y devuelve la probabilidad de falla y la decisión según el umbral del modelo, y `GET /modelo` informa la versión servida. La API detecta cuando el champion cambia y recarga el modelo sola.
+
+Cambios asociados: dependencias nuevas en `dockerfiles/fastapi/requirements.txt`, la variable `MLFLOW_TRACKING_URI` en el servicio `fastapi` de `docker-compose.yaml` y el script de prueba `dockerfiles/fastapi/probar_api.py`. El README suma la sección "Cómo usar la API" y `DOCUMENTACION.md` explica por qué se eligió el modo online frente al batch.
