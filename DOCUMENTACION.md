@@ -1,91 +1,68 @@
 # Documentación del proyecto — TP Final MLOps 1
 
-> **Estado al 27/09 (entrega parcial):** el pipeline de ETL (`proceso_etl`) y el de reentrenamiento challenger/champion (`entrenamiento_challenger`) están terminados y funcionando de punta a punta en Airflow, con tracking, Model Registry y promoción automática en MLflow. Lo único pendiente para la entrega final es conectar el endpoint de FastAPI para que sirva el modelo champion vigente (Track C, C2-C3 en `Plan de Trabajo.xlsx`).
-
-Este documento registra las decisiones de diseño e implementación que fuimos tomando a lo largo del proyecto, y por qué las tomamos. La idea es que sirva tanto de documentación técnica del trabajo como de registro para nosotros mismos, para no perder de vista los motivos detrás de cada decisión.
+Este documento registra las decisiones de diseño e implementación del proyecto y los motivos detrás de cada una. Para levantar el entorno y ejecutar el flujo, ver el [`README.md`](README.md); para el detalle de qué cambió en la entrega final, ver el [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Elección de la base del proyecto
 
-Para la parte de infraestructura containerizada partimos del repositorio `amq2-service-ml` de la cátedra, que trae armado con Docker Compose los servicios que pide la consigna: Apache Airflow, MLflow, una base PostgreSQL, MinIO (como reemplazo local de S3) y un servicio de FastAPI para servir el modelo.
+Para la parte de infraestructura containerizada partimos del repositorio `amq2-service-ml` de la cátedra, que trae armado con Docker Compose los servicios que pide la consigna: Apache Airflow, MLflow, una base PostgreSQL, MinIO (como reemplazo local de S3) y un servicio de FastAPI.
 
 Dentro de ese repositorio hay dos ramas relevantes:
 
 - `main`: es el scaffold base, sin ningún DAG ni modelo cargado. Es el punto de partida real para instalar el entorno.
-- `example_implementation`: es un ejemplo completo y funcional que arma la cátedra sobre otro dataset (Heart Disease), pensado explícitamente como guía para que cada grupo entienda cómo se estructura un DAG, cómo se loguea un experimento de búsqueda de hiperparámetros en MLflow, y cómo se conecta el modelo a la API.
+- `example_implementation`: es un ejemplo completo y funcional que arma la cátedra sobre otro dataset (Heart Disease), pensado como guía para entender cómo se estructura un DAG y cómo se loguea un experimento de búsqueda de hiperparámetros en MLflow.
 
-Decidimos instalar el entorno nosotros mismos siguiendo el README de la rama `main` paso a paso (crear las carpetas de Airflow, ajustar el `.env`, levantar Docker Compose), y usar `example_implementation` únicamente como referencia para entender el patrón antes de escribir nuestro propio DAG y nuestro propio experimento de MLflow para el caso de Scania. No copiamos su código directamente: lo usamos para entender la forma en que hay que resolver el problema, y después lo adaptamos a nuestro propio modelo y dataset.
-
-## Separación del notebook en scripts
-
-El notebook original (`Scania random forest.ipynb`) contenía toda la exploración de datos, el entrenamiento y la evaluación del modelo en un único archivo. Como buena práctica de código modular, lo separamos en tres scripts independientes, siguiendo el mismo esquema que se usó en el hands-on de la Clase 1 (separar en etapas de ETL, entrenamiento y testeo):
-
-- **`etl_scania.py`**: carga los datos crudos, limpia el dataset (elimina la columna constante, imputa valores faltantes), filtra features muy correlacionadas entre sí y con baja correlación respecto al target, separa los datos en train/validación/test, y guarda los artefactos resultantes (CSVs) para que los consuman los siguientes scripts.
-- **`train_scania_rf.py`**: entrena el modelo de Random Forest con búsqueda de hiperparámetros (`GridSearchCV`), usando como scorer la función de costo de negocio del problema (en vez de una métrica genérica), y elige el umbral de decisión que minimiza ese costo sobre el set de validación. Guarda el modelo entrenado y la información del entrenamiento.
-- **`test_scania_rf.py`**: evalúa el modelo final sobre el set de test (nunca visto durante el entrenamiento ni la elección de umbral), calculando las métricas de clasificación y generando los gráficos de diagnóstico (matriz de confusión, curva ROC, importancia de features).
-
-Cada script se documentó con docstrings en todas sus funciones, y se validó con Ruff siguiendo la misma configuración que usa la cátedra (línea máxima de 88 caracteres, reglas de estilo PEP 8, entre otras), tal como pidió el profesor en la Clase 1.
+Instalamos el entorno a partir de la rama `main` y usamos `example_implementation` únicamente como referencia para entender el patrón antes de escribir nuestros propios DAGs para el caso de Scania. No copiamos su código: lo usamos para entender cómo resolver el problema y después lo adaptamos a nuestro modelo y dataset.
 
 ## Infraestructura containerizada
 
-Copiamos al repositorio del equipo la infraestructura de la rama `main` de `amq2-service-ml`:
+Del scaffold de `amq2-service-ml` conservamos:
 
 - `docker-compose.yaml`, junto con los Dockerfiles de cada servicio (Airflow, MLflow, FastAPI, PostgreSQL), en la carpeta `dockerfiles/`.
-- La carpeta `airflow/`, incluyendo `secrets/` (para variables y conexiones de Airflow).
-- El archivo `.env` con las variables de entorno necesarias para levantar el stack (puertos, credenciales de los servicios locales, nombres de buckets).
-- `.gitignore` y `.gitattributes` del scaffold, para mantener fuera del repositorio archivos como `.venv`, `__pycache__`, o los logs de ejecución de Airflow.
+- La carpeta `airflow/`, con `config/`, `dags/`, `plugins/` y `secrets/` (variables y conexiones de Airflow). Las carpetas vacías se versionan con un archivo `.gitkeep`, de modo que al clonar el repositorio ya existen.
+- El archivo `.env` con las variables necesarias para levantar el stack (puertos, credenciales de los servicios locales, nombres de buckets).
+- `.gitignore` y `.gitattributes`, para mantener fuera del repositorio archivos como `.venv`, `__pycache__` o los logs de ejecución de Airflow.
 
-Siguiendo el paso 3 del README de `amq2-service-ml`, dentro de `airflow/` creamos las carpetas `config/`, `dags/`, `logs/` y `plugins/`, que Airflow necesita que existan antes de levantar los contenedores.
+La carpeta `airflow/logs/` queda excluida del control de versiones, porque ahí se acumulan los logs de cada ejecución. Docker la crea al levantar los contenedores, así que no hace falta crearla a mano.
 
-Una aclaración importante: la carpeta `airflow/logs/` queda excluida del control de versiones por el `.gitignore` (ahí se acumulan los logs de cada ejecución de Airflow, y no tiene sentido versionarlos). Esto significa que, al clonar el repositorio, cada integrante del equipo tiene que crear esa carpeta vacía de forma manual antes de levantar Docker Compose, porque Airflow espera encontrarla ya creada.
+Airflow corre con `CeleryExecutor`, con Redis como cola de tareas, tal como viene en el scaffold. Los DAGs usan `@task.virtualenv`: cada tarea crea un entorno virtual aislado y efímero por ejecución, con únicamente las dependencias que necesita, en lugar de depender del entorno global del contenedor de Airflow. A cambio, la primera ejecución de cada tarea demora más, porque instala sus dependencias.
 
-Respecto a las credenciales del `.env`: son las credenciales de ejemplo que trae el scaffold de la cátedra (usuario/contraseña genéricos para Airflow, PostgreSQL y MinIO). No representan un riesgo real porque los servicios solo quedan expuestos en `localhost` de la máquina de cada uno, no son accesibles desde internet.
+Respecto a las credenciales del `.env`: son las credenciales de ejemplo que trae el scaffold de la cátedra (usuario y contraseña genéricos para Airflow, PostgreSQL y MinIO). No representan un riesgo real porque los servicios solo quedan expuestos en el `localhost` de cada máquina, no son accesibles desde internet.
 
-## Verificación del entorno
+## Datos: extracción y carga (`proceso_EL`)
 
-Una vez levantado el stack con `docker compose --profile all up`, verificamos que los cuatro servicios quedaran operativos:
+El DAG `proceso_EL` se limita a extraer y cargar los datos, sin transformarlos. Tiene dos tareas encadenadas:
 
-- **Airflow** (`localhost:8080`): el panel de estado muestra en verde MetaDatabase, Scheduler, Triggerer y Dag Processor. Todavía no hay DAGs propios cargados.
-- **MLflow** (`localhost:5001`): accesible, con el experimento `Default` creado automáticamente.
-- **MinIO** (`localhost:9001`): accesible, con los buckets `data` y `mlflow` ya creados por el contenedor de inicialización.
-- **FastAPI** (`localhost:8800/docs`): accesible, mostrando por ahora el endpoint base del scaffold (`GET /`).
+- **`obtener_datos_crudos`**: verifica si los datasets originales (`aps_failure_training_set.csv` y `aps_failure_test_set.csv`) existen en el bucket `data` de MinIO, bajo `datos_originales/`. Si faltan, los descarga del repositorio UCI y los sube; si ya están, los reutiliza. Los contenedores de Airflow solo montan las carpetas de `airflow/`, no el resto del repositorio, por eso el punto de partida es siempre un bucket de MinIO. Descargar los datos desde el propio DAG permite que el flujo arranque solo desde un clon limpio, sin pasos manuales previos.
+- **`dividir_y_subir_splits`**: mapea la clase (`neg`/`pos`) a 0/1, separa el target de las features y divide el set de entrenamiento original en entrenamiento y validación (80/20, estratificado por clase, con semilla fija). El set de test es el que viene en el dataset original. Los seis archivos resultantes (`X_*` e `y_*`) se suben a MinIO bajo `datos_splits/`.
 
-Con esto confirmamos que la infraestructura containerizada quedó correctamente instalada y funcionando, antes de empezar a construir el DAG y el experimento propios del proyecto.
+**Por qué los datos se guardan sin transformar.** Estadísticas como la mediana de imputación o la correlación entre columnas dependen de los datos de entrenamiento. Si se calcularan antes de dividir, información de validación y de test se filtraría al ajuste del modelo. Por eso `proceso_EL` no imputa ni descarta columnas, y esa lógica vive en el `Pipeline` del modelo, que la ajusta únicamente con los datos de entrenamiento.
 
-## Integración de MLflow al entrenamiento
+El DAG está programado para ejecutarse los lunes a las 8:00.
 
-Una vez que tuvimos el pipeline separado en los tres scripts (`etl_scania.py`, `train_scania_rf.py`, `test_scania_rf.py`), sumamos tracking y registro de modelos con MLflow al script de entrenamiento, en una nueva versión llamada `train_scania_rf_mlflow.py`. Mantiene las mismas salidas locales (`modelo_rf.pkl`, `modelo_rf_info.json`, `log_entrenamiento.txt`) que ya consume `test_scania_rf.py`, así que no hizo falta tocar el script de testeo.
+## Modelo: Pipeline con umbral de decisión
 
-- **Tracking server y experimento**: el script configura `MLFLOW_TRACKING_URI` (apuntando al servidor levantado por Docker Compose) y el experimento `Fallas_Scania_APS`, que MLflow crea automáticamente la primera vez que se corre.
-- **Registro por corrida**: cada ejecución queda como un run nuevo dentro del experimento, sin pisar corridas anteriores. Se loguean los hiperparámetros elegidos por `GridSearchCV`, el umbral de decisión óptimo encontrado sobre el set de validación, y las métricas asociadas (costo de negocio, falsos positivos, falsos negativos).
-- **Artefacto versionado**: el modelo entrenado se loguea como artefacto en MLflow mediante `mlflow.sklearn.log_model`, usando MinIO como backend de artefactos (el mismo bucket `mlflow` que ya se creaba al levantar el stack).
-- **`registrar_modelo_champion()`**: registra cada run en el Model Registry bajo el nombre `modelo_scania_fallas` y le asigna el alias `champion` a la versión recién creada.
+El modelo que se registra en MLflow no es un `RandomForestClassifier` suelto, sino un `Pipeline` de scikit-learn con tres pasos:
 
-Un punto importante a dejar aclarado: tal como está implementada ahora, la asignación del alias `champion` es incondicional, no compara la corrida nueva contra el champion vigente, simplemente reemplaza el alias cada vez que se corre el script. Esto es intencional para esta etapa de exploración manual (lo que llamamos Bloque A): tiene sentido que cada prueba que hagamos quede marcada como el "candidato actual". La comparación explícita challenger vs. champion antes de decidir si promover un modelo —evaluando ambos sobre el set de test y quedándose con el mejor— la vamos a implementar recién en el DAG de reentrenamiento (Bloque B).
+1. **Limpieza e imputación:** elimina la columna constante `cd_000` e imputa los valores faltantes por la mediana de cada columna.
+2. **Selección por correlación:** de cada par de features con correlación absoluta mayor a 0,9 descarta una, y descarta además las features cuya correlación absoluta con el target es menor a 0,075.
+3. **`RandomForestClassifier`.**
 
-## Carga manual de datos crudos a MinIO
+Las medianas y las columnas descartadas se calculan una única vez, al ajustar el `Pipeline` con los datos de entrenamiento, y quedan fijas dentro del modelo. Esto resuelve dos problemas: evita la fuga de información entre conjuntos (la selección se rehace dentro de cada pliegue de la validación cruzada) y garantiza que el conjunto de columnas no cambie entre corridas, porque forma parte del artefacto y no se recalcula con cada dataset.
 
-Los datasets crudos (`aps_failure_training_set.csv`, `aps_failure_test_set.csv`) no viven dentro del repositorio como parte del pipeline automatizado: los contenedores de Airflow no tienen acceso al filesystem local de la máquina de cada integrante, así que el punto de partida tiene que ser un bucket de MinIO al que sí puedan acceder.
+El `Pipeline` se envuelve en un modelo `pyfunc` de MLflow (`ModeloConUmbral`) que además aplica el umbral de decisión sobre la probabilidad de la clase positiva y devuelve directamente 0 o 1. Así, cada versión registrada en el Model Registry es autosuficiente: recibe un registro crudo, con todas las columnas originales, y devuelve la decisión final, sin depender de un ETL externo, de un umbral guardado aparte ni de ningún otro archivo.
 
-Para resolver esto armamos `cargar_datos_originales_s3.py`, un script de "bootstrap" (el empujón inicial que pone en marcha el pipeline antes de que este pueda funcionar por sus propios medios): no corre dentro de ningún DAG, sino que cada integrante lo ejecuta manualmente desde su propia máquina cada vez que hay datos nuevos para sumar al proyecto. Sube los archivos crudos al bucket `data`, bajo el prefijo `datos_originales/`, que es de donde después el DAG de ETL los va a leer.
+**Optimización por costo de negocio.** Una falla de APS no detectada (falso negativo) cuesta 500 y una revisión innecesaria (falso positivo) cuesta 10. Por eso el modelo no se optimiza por exactitud:
 
-## DAG de ETL (`proceso_etl.py`)
+- La búsqueda de hiperparámetros (`GridSearchCV`, 5 pliegues, sobre `n_estimators`, `max_depth` y `min_samples_leaf`, con `class_weight="balanced"` por el desbalance de clases) usa el costo de negocio como métrica.
+- El umbral de decisión no se fija en 0,5: se prueba un rango de valores sobre el set de validación y se elige el que minimiza el costo.
 
-Migramos la lógica de `etl_scania.py` a un DAG de Airflow, para que el proceso de limpieza y preparación de datos deje de ser un paso manual y pase a ser parte del pipeline automatizado. El DAG se estructura en dos tareas encadenadas:
+## Reentrenamiento challenger/champion (`entrenamiento_challenger`)
 
-- **`obtener_dataset`**: verifica que los datos crudos existan en MinIO (subidos previamente por `cargar_datos_originales_s3.py`) y le pasa a la siguiente tarea la ubicación de los archivos.
-- **`procesar_etl`**: descarga los datos crudos, aplica la misma limpieza que `etl_scania.py` (elimina la columna constante, imputa valores faltantes por mediana, filtra features muy correlacionadas entre sí y con baja correlación respecto al target, separa train/validación/test), y sube los splits resultantes de vuelta a MinIO, bajo el prefijo `datos_procesados/`.
+El DAG `entrenamiento_challenger` entrena un modelo nuevo (el *challenger*) y decide si reemplaza al modelo vigente (el *champion*) en el Model Registry de MLflow. No tiene programación: se dispara a mano cuando se quiere reentrenar. Tiene dos tareas:
 
-Cada tarea usa `@task.virtualenv`, que crea un entorno virtual aislado y efímero por ejecución con únicamente las dependencias que esa tarea necesita, en vez de depender del entorno global del contenedor de Airflow.
+- **`entrenar_modelo`**: descarga los splits de MinIO, ajusta el `Pipeline` con la búsqueda de hiperparámetros y la elección de umbral descritas arriba, y registra un run nuevo en el experimento `Fallas_Scania_APS` con los hiperparámetros, el umbral, las métricas de costo, falsos positivos y falsos negativos (en validación y en test), y la curva ROC y la matriz de confusión como artefactos. El modelo `pyfunc` queda guardado en el run, pero todavía no en el Model Registry.
+- **`comparar_y_promover`**: decide si el challenger reemplaza al champion. Evalúa a ambos sobre el mismo set de test y compara el costo de negocio por muestra (el costo total dividido por la cantidad de muestras), para que la comparación sea justa aunque el tamaño del test cambie entre corridas. Si el challenger tiene menor costo, registra una nueva versión de `modelo_scania_fallas` y le asigna el alias `champion`. Si no, no se registra nada y el run queda solo en el historial del experimento.
 
-## DAG de reentrenamiento challenger/champion (`entrenamiento_challenger.py`)
+Cuando todavía no existe ningún champion (primera corrida), el challenger se registra y se promueve directamente.
 
-Este es el DAG que automatiza el Bloque B: entrenar un modelo nuevo (el "challenger") y decidir si reemplaza al modelo vigente en producción (el "champion") en el Model Registry de MLflow. Se estructura en dos tareas:
-
-- **`entrenar_modelo`**: descarga los datos procesados desde MinIO, entrena un `RandomForestClassifier` con búsqueda de hiperparámetros y elección de umbral de decisión (mismo criterio que `train_scania_rf_mlflow.py`), y lo loguea como un run nuevo en MLflow —con la curva ROC y la matriz de confusión como artefactos— sin registrarlo todavía en el Model Registry.
-- **`comparar_y_promover`**: decide si ese challenger reemplaza al champion vigente, evaluando a ambos sobre el set de test y quedándose con el de menor costo de negocio (normalizado por cantidad de muestras, para que la comparación sea justa entre corridas con datasets de distinto tamaño).
-
-Para poder hacer rollback sin tener que buscar en el historial de versiones, la promoción reasigna dos alias: `champion` (el modelo vigente) y `champion_anterior` (el que estaba vigente justo antes).
-
-## Estabilización del esquema de columnas del ETL
-
-Detectamos que `procesar_etl` podía generar un conjunto distinto de columnas según el dataset de entrada, lo que rompía la compatibilidad entre un champion ya entrenado y una corrida posterior. Se resolvió calculando ese esquema de columnas una única vez y persistiéndolo en MinIO (`datos_procesados/columnas_descartadas.json`).
+Para poder volver atrás sin buscar en el historial de versiones, cada promoción reasigna dos alias: `champion` pasa a la versión nueva y `champion_anterior` queda en la que estaba vigente justo antes.

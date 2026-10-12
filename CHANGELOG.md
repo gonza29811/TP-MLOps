@@ -22,3 +22,13 @@ En `entrenamiento_challenger.py`, el Pipeline de scikit-learn que se entrena aho
 Al cambiar el contrato de entrada del modelo (ver entrada anterior), el `champion` que ya estaba registrado en MLflow quedó desactualizado: esperaba datos ya preprocesados (imputados y filtrados por columnas), no los datos crudos de 170 columnas que ahora produce `proceso_EL`. Al correr `entrenamiento_challenger` por primera vez con la arquitectura nueva, `comparar_y_promover` intentaba evaluar ese champion viejo con los datos nuevos y fallaba con un error de MLflow ("Failed to enforce schema of data"), porque los datos no cumplían el contrato con el que ese champion había sido registrado.
 
 Se resolvió sacándole manualmente el alias `champion` a esa versión vieja desde la UI de MLflow. `comparar_y_promover` ya tenía previsto este caso: al no encontrar ningún modelo con el alias `champion`, entra en la rama de "arranque en frío" y registra y promueve directamente el challenger entrenado, sin comparar contra nada. Así, el primer modelo de la arquitectura nueva (Pipeline + pyfunc) quedó como `champion` vigente. Esto fue un paso manual de transición, necesario una sola vez por el cambio de contrato; de acá en adelante las comparaciones entre challenger y champion vuelven a ser automáticas.
+
+## Limpieza del repositorio
+
+Atiende el punto de la devolución sobre los archivos de datos y artefactos de más que estaban commiteados y sobre la documentación contradictoria. Se eliminó la carpeta `scania_rf/`, que contenía la versión del modelo previa a la automatización en Airflow: los scripts de ETL, entrenamiento y testeo (`etl_scania.py`, `train_scania_rf.py`, `train_scania_rf_mlflow.py`, `test_scania_rf.py`), los scripts auxiliares (`cargar_datos_originales_s3.py`, `reducir_dataset.py`), los datasets originales y sus splits, `modelo_rf.pkl` junto con sus archivos de información y logs, y el `README.md` propio de esa carpeta (unos 100 MB en total).
+
+Ninguno de esos archivos formaba parte del flujo: los DAGs leen y escriben todo en MinIO, y la lógica de los scripts ya estaba reimplementada en `proceso_EL` y `entrenamiento_challenger`. Los datos los descarga `proceso_EL` desde UCI. Quien quiera consultar esa versión anterior puede recuperarla desde el historial de git.
+
+El `README.md` de la raíz pasó a ser la única guía para levantar y ejecutar el proyecto.
+
+`DOCUMENTACION.md` se reescribió para describir el diseño actual y los motivos de cada decisión, sin el relato de las etapas anteriores: ya no menciona los scripts eliminados, el DAG `proceso_etl` ni la carga manual de datos.

@@ -92,7 +92,7 @@ flowchart LR
    docker compose --profile all ps
    ```
 
-   Deben figurar en estado `healthy` o `running`. Los contenedores `airflow-init` y `minio_create_bucket` terminan solos y aparecen como `exited`: es lo esperado.
+   Deben figurar los diez servicios en estado `healthy`. Los contenedores `airflow-init` y `minio_create_bucket` terminan solos después de inicializar el entorno, por eso no aparecen en esa lista (se pueden ver con `docker compose --profile all ps -a`, como `exited`).
 4. Para detener el entorno, presionar `Ctrl+C` en la terminal donde se ejecutó el paso 2 y, para eliminar los contenedores conservando los datos, ejecutar `docker compose --profile all down`. Para borrarlo todo, incluidos los volúmenes (MinIO y las bases de MLflow y Airflow), agregar la opción `-v`.
 
 No hace falta crear carpetas ni cargar datos a mano: `airflow/config`, `airflow/dags` y `airflow/plugins` ya vienen en el repositorio, `airflow/logs` la crea Docker y los datos los descarga el primer DAG.
@@ -149,7 +149,6 @@ Se ejecuta de forma manual (*Trigger*) y tiene dos tareas:
 - **`airflow/`**: DAGs (`proceso_EL.py`, `entrenamiento_challenger.py`) y configuración de Airflow.
 - **`dockerfiles/`**: imágenes de Airflow, MLflow, PostgreSQL y FastAPI.
 - **`docker-compose.yaml`, `.env`**: definición de los servicios y de sus variables de configuración.
-- **`scania_rf/`**: scripts del modelo de Machine Learning (ETL, entrenamiento y testeo). Ver [`scania_rf/README.md`](scania_rf/README.md).
 - **[`DOCUMENTACION.md`](DOCUMENTACION.md)**: registro de las decisiones de diseño e implementación.
 - **[`CHANGELOG.md`](CHANGELOG.md)**: registro cronológico de los cambios hechos para la entrega final.
 
