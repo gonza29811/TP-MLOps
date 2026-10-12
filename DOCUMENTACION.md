@@ -4,18 +4,18 @@ Este documento registra las decisiones de diseño e implementación del proyecto
 
 ## Elección de la base del proyecto
 
-Para la parte de infraestructura containerizada partimos del repositorio `amq2-service-ml` de la cátedra, que trae armado con Docker Compose los servicios que pide la consigna: Apache Airflow, MLflow, una base PostgreSQL, MinIO (como reemplazo local de S3) y un servicio de FastAPI.
+La infraestructura containerizada parte del repositorio `amq2-service-ml` de la cátedra, que trae armado con Docker Compose los servicios que pide la consigna: Apache Airflow, MLflow, una base PostgreSQL, MinIO (como reemplazo local de S3) y un servicio de FastAPI.
 
 Dentro de ese repositorio hay dos ramas relevantes:
 
 - `main`: es el scaffold base, sin ningún DAG ni modelo cargado. Es el punto de partida real para instalar el entorno.
 - `example_implementation`: es un ejemplo completo y funcional que arma la cátedra sobre otro dataset (Heart Disease), pensado como guía para entender cómo se estructura un DAG y cómo se loguea un experimento de búsqueda de hiperparámetros en MLflow.
 
-Instalamos el entorno a partir de la rama `main` y usamos `example_implementation` únicamente como referencia para entender el patrón antes de escribir nuestros propios DAGs para el caso de Scania. No copiamos su código: lo usamos para entender cómo resolver el problema y después lo adaptamos a nuestro modelo y dataset.
+El entorno se instala a partir de la rama `main`, y `example_implementation` se usa únicamente como referencia para entender el patrón antes de escribir los DAGs propios para el caso de Scania. Su código no se copió: sirvió para entender cómo resolver el problema y luego se adaptó al modelo y al dataset del proyecto.
 
 ## Infraestructura containerizada
 
-Del scaffold de `amq2-service-ml` conservamos:
+Del scaffold de `amq2-service-ml` se conservan:
 
 - `docker-compose.yaml`, junto con los Dockerfiles de cada servicio (Airflow, MLflow, FastAPI, PostgreSQL), en la carpeta `dockerfiles/`.
 - La carpeta `airflow/`, con `config/`, `dags/`, `plugins/` y `secrets/` (variables y conexiones de Airflow). Las carpetas vacías se versionan con un archivo `.gitkeep`, de modo que al clonar el repositorio ya existen.
@@ -69,7 +69,7 @@ Para poder volver atrás sin buscar en el historial de versiones, cada promoció
 
 ## Servicio de predicción online (FastAPI)
 
-**Online vs batch.** Elegimos servir el modelo de forma *online*: la API responde cada pedido en el momento, con el champion vigente. La alternativa, *batch*, consiste en predecir sobre un conjunto grande de registros con un proceso programado (por ejemplo, un DAG que corra cuando aparezca un champion nuevo) y guardar el resultado; es útil para volúmenes grandes, pero deja a la API sin función. Un DAG batch se podría sumar más adelante reutilizando la misma carga del modelo.
+**Online vs batch.** Se eligió servir el modelo de forma *online*: la API responde cada pedido en el momento, con el champion vigente. La alternativa, *batch*, consiste en predecir sobre un conjunto grande de registros con un proceso programado (por ejemplo, un DAG que corra cuando aparezca un champion nuevo) y guardar el resultado; es útil para volúmenes grandes, pero deja a la API sin función. Un DAG batch se podría sumar más adelante reutilizando la misma carga del modelo.
 
 **Funcionamiento.** `dockerfiles/fastapi/app.py` carga `models:/modelo_scania_fallas@champion` desde el Model Registry. En cada pedido consulta qué versión tiene el alias `champion` y, si cambió, vuelve a cargar el modelo, de modo que una promoción hecha por `comparar_y_promover` se refleja sin reiniciar el servicio. Si todavía no existe un champion, responde 503.
 

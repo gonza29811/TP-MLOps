@@ -30,34 +30,32 @@ Implementación productiva del modelo de detección de fallas del sistema de air
 Flujo de datos:
 
 ```mermaid
-flowchart LR
+flowchart TB
     UCI(["Repositorio UCI<br/>APS Failure at Scania Trucks"])
 
     subgraph EL["DAG proceso_EL"]
+        direction LR
         T1["obtener_datos_crudos"]
+        D1[("MinIO · data/datos_originales<br/>entrenamiento y test crudos")]
         T2["dividir_y_subir_splits"]
+        D2[("MinIO · data/datos_splits<br/>train · val · test")]
+        T1 --> D1 --> T2 --> D2
     end
 
     subgraph TR["DAG entrenamiento_challenger"]
+        direction LR
         T3["entrenar_modelo"]
+        RUN["MLflow · run del experimento<br/>parámetros · métricas · gráficos · modelo"]
         T4["comparar_y_promover"]
+        REG["MLflow · Model Registry<br/>modelo_scania_fallas · alias champion"]
+        T3 --> RUN --> T4 --> REG
     end
 
-    D1[("MinIO · data/datos_originales<br/>entrenamiento y test crudos")]
-    D2[("MinIO · data/datos_splits<br/>train · val · test")]
-    RUN["MLflow · run del experimento<br/>parámetros · métricas · gráficos<br/>modelo guardado en MinIO (bucket mlflow)"]
-    REG["MLflow · Model Registry<br/>modelo_scania_fallas con alias champion"]
-    API["FastAPI<br/>POST /predict"]
+    API["FastAPI · POST /predict"]
 
-    UCI -->|"descarga si no están"| T1
-    T1 --> D1
-    D1 --> T2
-    T2 --> D2
-    D2 --> T3
-    T3 --> RUN
-    RUN --> T4
-    T4 -->|"si el challenger supera al champion"| REG
-    REG -->|"carga el champion"| API
+    UCI -->|"descarga si no están"| EL
+    EL -->|"lee los splits"| TR
+    TR -->|"carga el champion"| API
 
     classDef task fill:#e3f2fd,stroke:#1565c0,color:#0d2c4d
     classDef storage fill:#fff3e0,stroke:#e65100,color:#4a2000

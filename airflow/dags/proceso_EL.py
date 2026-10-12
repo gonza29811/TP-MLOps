@@ -29,9 +29,9 @@ def proceso_el():
         Se asegura de que los datos originales existan en MinIO (bucket
         `data`, prefijo `datos_originales/`).
 
-        Si ya estan (por ejemplo porque alguien los subio a mano con
-        cargar_datos_originales_s3.py, o porque una corrida anterior de
-        este mismo DAG ya los descargo), se reutilizan tal cual. Si no
+        Si ya estan (por ejemplo porque alguien los subio a mano o porque
+        una corrida anterior de este mismo DAG ya los descargo), se
+        reutilizan tal cual. Si no
         estan, se descargan automaticamente desde el repositorio UCI
         (dataset "APS Failure at Scania Trucks") y se suben a MinIO, para
         que el flujo pueda arrancar solo desde un clon limpio del
