@@ -38,3 +38,7 @@ El `README.md` de la raíz pasó a ser la única guía para levantar y ejecutar 
 Antes el servicio de FastAPI solo tenía un endpoint de bienvenida. Ahora sirve el modelo `champion` del Model Registry de forma online: `POST /predict` recibe registros crudos y devuelve la probabilidad de falla y la decisión según el umbral del modelo, y `GET /modelo` informa la versión servida. La API detecta cuando el champion cambia y recarga el modelo sola.
 
 Cambios asociados: dependencias nuevas en `dockerfiles/fastapi/requirements.txt`, la variable `MLFLOW_TRACKING_URI` en el servicio `fastapi` de `docker-compose.yaml` y el script de prueba `dockerfiles/fastapi/probar_api.py`. El README suma la sección "Cómo usar la API" y `DOCUMENTACION.md` explica por qué se eligió el modo online frente al batch.
+
+## Validación con datos sintéticos
+
+Se incorporó un script de generación de datos simulados (`dockerfiles/fastapi/probar_api_sintetico.py`) para testear el endpoint de FastAPI de forma automatizada. Esto permite auditar la respuesta del modelo *champion* vigente y el correcto funcionamiento del entorno de la API sin depender de las extracciones de datos reales del dataset de prueba.
