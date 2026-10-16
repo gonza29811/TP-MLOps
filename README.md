@@ -173,6 +173,18 @@ En PowerShell:
 Get-Content dockerfiles/fastapi/probar_api.py | docker compose exec -T fastapi python -
 ```
 
+**Prueba con datos sintéticos.** Para auditar el flujo completo y comprobar que la API respeta el umbral de decisión sin depender del dataset original, el script `dockerfiles/fastapi/probar_api_sintetico.py` genera valores de sensores simulados y evalúa la respuesta de la API. Se ejecuta desde la raíz del repositorio:
+
+```bash
+docker compose exec -T fastapi python - < dockerfiles/fastapi/probar_api_sintetico.py
+```
+
+En PowerShell:
+
+```powershell
+Get-Content dockerfiles/fastapi/probar_api_sintetico.py | docker compose exec -T fastapi python -
+```
+
 ## Estructura del repositorio
 
 - **`airflow/`**: DAGs (`proceso_EL.py`, `entrenamiento_challenger.py`) y configuración de Airflow.
